@@ -113,42 +113,45 @@ new function() {
 	}
 
 	function exportPath(item, options) {
-		if (options.matchShapes) {
-			var shape = item.toShape(false);
-			if (shape)
-				return exportShape(shape, options);
-		}
-		var segments = item._segments,
-			type,
-			attrs;
-		if (segments.length === 0)
-			return null;
-		if (item.isPolygon()) {
-			if (segments.length >= 3) {
-				type = item._closed ? 'polygon' : 'polyline';
-				var parts = [];
-				for(i = 0, l = segments.length; i < l; i++)
-					parts.push(formatter.point(segments[i]._point));
-				attrs = {
-					points: parts.join(' ')
-				};
-			} else {
-				type = 'line';
-				var first = segments[0]._point,
-					last = segments[segments.length - 1]._point;
-				attrs = {
-					x1: first.x,
-					y1: first.y,
-					x2: last.x,
-					y2: last.y
-				};
-			}
-		} else {
-			type = 'path';
-			var data = item.getPathData();
-			attrs = data && { d: data };
-		}
-		return createElement(type, attrs);
+        if (options.matchShapes) {
+            var shape = item.toShape(false);
+            if (shape)
+                return exportShape(shape, options);
+        }
+        var segments = item._segments,
+            type,
+            attrs;
+        if (segments.length === 0)
+            return null;
+        if (item.isPolygon()) {
+            var svgBounds = paper.project.SVGBounds;
+            if (segments.length >= 3) {
+                type = item._closed ? 'polygon' : 'polyline';
+                var parts = [];
+                for(i = 0, l = segments.length; i < l; i++)  {
+                    p = new Point(segments[i]._point.x-svgBounds.x+5,segments[i]._point.y-svgBounds.y+5);
+                    parts.push(formatter.point(p));
+                }
+                attrs = {
+                    points: parts.join(' ')
+                };
+            } else {
+                type = 'line';
+                var first = new Point(segments[0]._point.x-svgBounds.x+5,segments[0]._point.y-svgBounds.y+5),
+                    last = new Point(segments[segments.length - 1]._point.x-svgBounds.x+5,segments[segments.length - 1]._point.y-svgBounds.y+5);
+                attrs = {
+                    x1: first.x,
+                    y1: first.y,
+                    x2: last.x,
+                    y2: last.y
+                };
+            }
+        } else {
+            type = 'path';
+            var data = item.getPathData();
+            attrs = data && { d: data };
+        }
+        return createElement(type, attrs);
 	}
 
 	function exportShape(item) {
@@ -264,9 +267,12 @@ new function() {
 	}
 
 	function exportText(item) {
-		var node = createElement('text', getTransform(item, true));
-		node.textContent = item._content;
-		return node;
+        var svgBounds = paper.project.SVGBounds, coords = getTransform(item, true);
+        coords.x = coords.x-svgBounds.x+5;
+        coords.y = coords.y-svgBounds.y+6;
+        var node = createElement('text', coords);
+        node.textContent = item._content;
+        return node;
 	}
 
 	var exporters = {
@@ -378,10 +384,72 @@ new function() {
 	}
 
 	function exportSVG(item, options) {
-		var exporter = exporters[item._type],
-			node = exporter && exporter(item, options);
-		if (node && item._data)
-			node.setAttribute('data-paper-data', JSON.stringify(item._data));
+        var exporter = exporters[item._type],
+            node = exporter && exporter(item, options);
+        if (node && item._data)
+            node.setAttribute('data-paper-data', JSON.stringify(item._data));
+        if (item.dType && item.dType === 'bond' && (!item.bondType || item.bondType !== "aux")) {
+            if (!item._bData) item._bData = {};
+            item._bData.bO = item.bondOrder || 1;
+            switch (item.stereo) {
+                case 0: {
+                    item._bData.bS = 0;
+                    break;
+                }
+                case undefined: {
+                    item._bData.bS = 0;
+                    break;
+                }
+                case 'wedged': {
+                    item._bData.bS = 1;
+                    break;
+                }
+                case 'hashed': {
+                    item._bData.bS = 6;
+                    break;
+                }
+                default: {
+                    item._bData.bS = 0;
+                }
+            }
+            var nodes = [item.n_a, item.n_b], labels = [], points = {};
+            for (var i = 0, l = nodes.length; i < l; i++) {
+                if (nodes[i].labels && nodes[i].labels.atom) {
+                    labels.push(nodes[i].labels.atom.content);
+                    points[labels[i]] = new Point({
+                        x: nodes[i].labels.atom.point.x,
+                        y: nodes[i].labels.atom.point.y - 3.5
+                    })
+                } else {
+                    labels.push("C")
+                }
+            }
+            item._bData.a1 = {
+                id: item.n_a.ref.substring(5),
+                x: points[labels[0]] ? points[labels[0]].x.toFixed(5) : item.n_a.point.x.toFixed(5),
+                y: points[labels[0]] ? points[labels[0]].y.toFixed(5) : item.n_a.point.y.toFixed(5),
+                l: labels[0]
+            };
+            item._bData.a2 = {
+                id: item.n_b.ref.substring(5),
+                x: points[labels[1]] ? points[labels[1]].x.toFixed(5) : item.n_b.point.x.toFixed(5),
+                y: points[labels[1]] ? points[labels[1]].y.toFixed(5) : item.n_b.point.y.toFixed(5),
+                l: labels[1]
+            };
+        } else if (item.dType && item.dType === 'label') {
+            if (!item._bData) item._bData = {};
+            item._bData.c = item.content;
+            var point = new Point({
+                x: item.point.x,
+                y: item.point.y - 3.5
+            })
+            item._bData.p = {
+                x: point.x,
+                y: point.y
+            };
+        }
+        if (node && item._bData)
+            node.setAttribute('bData', JSON.stringify(item._bData));
 		return node && applyStyle(item, node);
 	}
 
@@ -400,22 +468,48 @@ new function() {
 	});
 
 	Project.inject({
-		exportSVG: function(options) {
-			options = setOptions(options);
-			var layers = this.layers,
-				size = this.view.getSize(),
-				node = createElement('svg', {
-					x: 0,
-					y: 0,
-					width: size.width,
-					height: size.height,
-					version: '1.1',
-					xmlns: 'http://www.w3.org/2000/svg',
-					'xmlns:xlink': 'http://www.w3.org/1999/xlink'
-				});
-			for (var i = 0, l = layers.length; i < l; i++)
-				node.appendChild(exportSVG(layers[i], options));
-			return exportDefinitions(node, options);
-		}
+        getSvgBounds: function() {
+            var bounds = void 0, i = 0, l = this.layers.length;
+            while(i < l) {
+                var layer = this.layers[i], j = 0, k = layer.children.length;
+                while(j < k) {
+                    var child = layer.children[j]
+                    if (child.type === "group" && child.children.length !== 0) {
+                        if (!bounds) {
+                            bounds = child.bounds;
+                        } else {
+                            var rect = child.bounds;
+                            var x1 = Math.min(bounds._x || bounds.x, rect._x),
+                                y1 = Math.min(bounds._y || bounds.y, rect._y),
+                                x2 = Math.max((bounds._x || bounds.x) + bounds.width, (rect._x || rect.x) + rect.width),
+                                y2 = Math.max((bounds._y || bounds.y) + bounds.height, (rect._y || rect.y) + rect.height);
+                            bounds = new Rectangle(x1, y1, x2 - x1, y2 - y1);
+                        }
+                    }
+                    j++;
+                }
+                i++;
+            }
+            return bounds;
+        },
+        exportSVG: function(options) {
+            options = setOptions(options);
+            this.SVGBounds = this.getSvgBounds();
+            this.SVGBoundsSize = new Size(this.SVGBounds.size.width+10, this.SVGBounds.size.height+10);
+            var layers = this.layers,
+                size = this.SVGBoundsSize || this.view.getSize(),
+                node = createElement('svg', {
+                    x: 0,
+                    y: 0,
+                    width: size.width,
+                    height: size.height,
+                    version: '1.1',
+                    xmlns: 'http://www.w3.org/2000/svg',
+                    'xmlns:xlink': 'http://www.w3.org/1999/xlink'
+                });
+            for (var i = 0, l = layers.length; i < l; i++)
+                node.appendChild(exportSVG(layers[i], options));
+            return exportDefinitions(node, options);
+        }
 	});
 };

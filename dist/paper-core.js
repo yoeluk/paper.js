@@ -9,7 +9,7 @@
  *
  * All rights reserved.
  *
- * Date: Sun Dec 1 23:54:52 2013 +0100
+ * Date: Mon Dec 16 02:24:53 2013 -0800
  *
  ***
  *
@@ -33,8 +33,7 @@
 var paper = new function(undefined) {
 
 var Base = new function() {
-	var hidden = /^(statics|generics|preserve|enumerable|prototype|toString|valueOf)$/,
-		slice = [].slice,
+	var hidden = /^(statics|preserve|enumerable|prototype|toString|valueOf)$/,
 
 		forEach = [].forEach || function(iter, bind) {
 			for (var i = 0, l = this.length; i < l; i++)
@@ -79,10 +78,10 @@ var Base = new function() {
 			return _define(obj, name, desc);
 		};
 
-	function inject(dest, src, enumerable, base, preserve, generics) {
+	function inject(dest, src, enumerable, base, preserve) {
 		var beans;
 
-		function field(name, val, dontCheck, generics) {
+		function field(name, val, dontCheck) {
 			var val = val || (val = describe(src, name))
 					&& (val.get ? val : val.value);
 			if (typeof val === 'string' && val[0] === '#')
@@ -109,18 +108,12 @@ var Base = new function() {
 				}
 				define(dest, name, res);
 			}
-			if (generics && isFunc && (!preserve || !generics[name])) {
-				generics[name] = function(bind) {
-					return bind && dest[name].apply(bind,
-							slice.call(arguments, 1));
-				};
-			}
 		}
 		if (src) {
 			beans = [];
 			for (var name in src)
 				if (src.hasOwnProperty(name) && !hidden.test(name))
-					field(name, null, true, generics);
+					field(name, null, true);
 			field('toString');
 			field('valueOf');
 			for (var i = 0, l = beans.length; i < l; i++) {
@@ -151,10 +144,6 @@ var Base = new function() {
 		return dest;
 	}
 
-	function clone(obj) {
-		return copy(new obj.constructor(), obj);
-	}
-
 	return inject(function Base() {
 		for (var i = 0, l = arguments.length; i < l; i++)
 			copy(this, arguments[i]);
@@ -166,7 +155,7 @@ var Base = new function() {
 					statics = src.statics === true ? src : src.statics;
 				if (statics != src)
 					inject(proto, src, src.enumerable, base && base.prototype,
-							src.preserve, src.generics && this);
+							src.preserve);
 				inject(this, statics, true, base, src.preserve);
 			}
 			for (var i = 1, l = arguments.length; i < l; i++)
@@ -184,6 +173,7 @@ var Base = new function() {
 				base.apply(this, arguments);
 			};
 			ctor.prototype = create(this.prototype);
+			ctor.base = base;
 			define(ctor.prototype, 'constructor',
 					{ value: ctor, writable: true, configurable: true });
 			inject(ctor, this, true);
@@ -240,8 +230,6 @@ if (typeof module !== 'undefined')
 	module.exports = Base;
 
 Base.inject({
-	generics: true,
-
 	toString: function() {
 		return this._id != null
 			?  (this._class || 'Object') + (this._name
@@ -319,7 +307,8 @@ Base.inject({
 				if (!checkKeys(obj1, obj2) || !checkKeys(obj2, obj1))
 					return false;
 				for (var i in obj1) {
-					if (obj1.hasOwnProperty(i) && !Base.equals(obj1[i], obj2[i]))
+					if (obj1.hasOwnProperty(i)
+							&& !Base.equals(obj1[i], obj2[i]))
 						return false;
 				}
 				return true;
@@ -464,7 +453,8 @@ Base.inject({
 		},
 
 		deserialize: function(json, create, _data) {
-			var res = json;
+			var res = json,
+				isRoot = !_data;
 			_data = _data || {};
 			if (Array.isArray(json)) {
 				var type = json[0],
@@ -482,7 +472,7 @@ Base.inject({
 				} else if (type) {
 					var args = res;
 					if (create) {
-						res = create(type, args);
+						res = create(type, args, isRoot);
 					} else {
 						res = Base.create(type.prototype);
 						type.apply(res, args);
@@ -503,12 +493,12 @@ Base.inject({
 		importJSON: function(json, target) {
 			return Base.deserialize(
 					typeof json === 'string' ? JSON.parse(json) : json,
-					function(type, args) {
+					function(type, args, isRoot) {
 						var obj = target && target.constructor === type
 								? target
 								: Base.create(type.prototype),
 							isTarget = obj === target;
-						if (args.length === 1 && obj instanceof Item
+						if (!isRoot && args.length === 1 && obj instanceof Item
 								&& (!(obj instanceof Layer) || isTarget)) {
 							var arg = args[0];
 							if (Base.isPlainObject(arg))
@@ -624,11 +614,12 @@ var Callback = {
 		function callHandlers() {
 			for (var i in handlers) {
 				if (handlers[i].apply(that, args) === false
-						&& event && event.stop)
+						&& event && event.stop) {
 					event.stop();
+					break;
+				}
 			}
 		}
-
 		if (handleException) {
 			try {
 				callHandlers();
@@ -649,6 +640,19 @@ var Callback = {
 	off: '#detach',
 	trigger: '#fire',
 
+	_installEvents: function(install) {
+		var handlers = this._handlers,
+			key = install ? 'install' : 'uninstall';
+		for (var type in handlers) {
+			if (handlers[type].length > 0) {
+				var entry = this._eventTypes[type],
+					func = entry[key];
+				if (func)
+					func.call(this, type);
+			}
+		}
+	},
+
 	statics: {
 		inject: function inject() {
 			for (var i = 0, l = arguments.length; i < l; i++) {
@@ -667,11 +671,11 @@ var Callback = {
 							return this[name];
 						};
 						src['set' + part] = function(func) {
-							if (func) {
+							var prev = this[name];
+							if (prev)
+								this.detach(type, prev);
+							if (func)
 								this.attach(type, func);
-							} else if (this[name]) {
-								this.detach(type, this[name]);
-							}
 							this[name] = func;
 						};
 					});
@@ -1595,8 +1599,8 @@ var Rectangle = Base.extend({
 	},
 
 	getPoint: function() {
-		return new (arguments[0] ? Point : LinkedPoint)
-				(this.x, this.y, this, 'setPoint');
+		var ctor = arguments[0] ? Point : LinkedPoint;
+		return new ctor(this.x, this.y, this, 'setPoint');
 	},
 
 	setPoint: function(point) {
@@ -1606,8 +1610,8 @@ var Rectangle = Base.extend({
 	},
 
 	getSize: function() {
-		return new (arguments[0] ? Size : LinkedSize)
-				(this.width, this.height, this, 'setSize');
+		var ctor = arguments[0] ? Size : LinkedSize;
+		return new ctor(this.width, this.height, this, 'setSize');
 	},
 
 	setSize: function(size) {
@@ -1691,8 +1695,8 @@ var Rectangle = Base.extend({
 	},
 
 	getCenter: function() {
-		return new (arguments[0] ? Point : LinkedPoint)
-				(this.getCenterX(), this.getCenterY(), this, 'setCenter');
+		var ctor = arguments[0] ? Point : LinkedPoint;
+		return new ctor(this.getCenterX(), this.getCenterY(), this, 'setCenter');
 	},
 
 	setCenter: function(point) {
@@ -1702,8 +1706,12 @@ var Rectangle = Base.extend({
 		return this;
 	},
 
+	getArea: function() {
+		return this.width * this.height;
+	},
+
 	isEmpty: function() {
-		return this.width == 0 || this.height == 0;
+		return this.width === 0 || this.height === 0;
 	},
 
 	contains: function(arg) {
@@ -1772,9 +1780,10 @@ var Rectangle = Base.extend({
 		return new Rectangle(x1, y1, x2 - x1, y2 - y1);
 	},
 
-	expand: function(hor, ver) {
-		if (ver === undefined)
-			ver = hor;
+	expand: function() {
+		var amount = Size.read(arguments),
+			hor = amount.width,
+			ver = amount.height;
 		return new Rectangle(this.x - hor / 2, this.y - ver / 2,
 				this.width + hor, this.height + ver);
 	},
@@ -1804,8 +1813,8 @@ var Rectangle = Base.extend({
 				get = 'get' + part,
 				set = 'set' + part;
 			this[get] = function() {
-				return new (arguments[0] ? Point : LinkedPoint)
-						(this[getX](), this[getY](), this, set);
+				var ctor = arguments[0] ? Point : LinkedPoint;
+				return new ctor(this[getX](), this[getY](), this, set);
 			};
 			this[set] = function(point) {
 				point = Point.read(arguments);
@@ -1947,6 +1956,16 @@ var Matrix = Base.extend({
 		return this;
 	},
 
+	translate: function() {
+		var point = Point.read(arguments),
+			x = point.x,
+			y = point.y;
+		this._tx += x * this._a + y * this._b;
+		this._ty += x * this._c + y * this._d;
+		this._changed();
+		return this;
+	},
+
 	scale: function() {
 		var scale = Point.read(arguments),
 			center = Point.read(arguments, 0, 0, { readNull: true });
@@ -1962,19 +1981,9 @@ var Matrix = Base.extend({
 		return this;
 	},
 
-	translate: function(point) {
-		point = Point.read(arguments);
-		var x = point.x,
-			y = point.y;
-		this._tx += x * this._a + y * this._b;
-		this._ty += x * this._c + y * this._d;
-		this._changed();
-		return this;
-	},
-
 	rotate: function(angle, center) {
 		center = Point.read(arguments, 1);
-		angle = angle * Math.PI / 180;
+		angle *= Math.PI / 180;
 		var x = center.x,
 			y = center.y,
 			cos = Math.cos(angle),
@@ -1996,20 +2005,29 @@ var Matrix = Base.extend({
 	},
 
 	shear: function() {
-		var point = Point.read(arguments),
+		var shear = Point.read(arguments),
 			center = Point.read(arguments, 0, 0, { readNull: true });
 		if (center)
 			this.translate(center);
 		var a = this._a,
 			c = this._c;
-		this._a += point.y * this._b;
-		this._c += point.y * this._d;
-		this._b += point.x * a;
-		this._d += point.x * c;
+		this._a += shear.y * this._b;
+		this._c += shear.y * this._d;
+		this._b += shear.x * a;
+		this._d += shear.x * c;
 		if (center)
 			this.translate(center.negate());
 		this._changed();
 		return this;
+	},
+
+	skew: function() {
+		var skew = Point.read(arguments),
+			center = Point.read(arguments, 0, 0, { readNull: true }),
+			toRadians = Math.PI / 180,
+			shear = new Point(Math.tan(skew.x * toRadians),
+				Math.tan(skew.y * toRadians));
+		return this.shear(shear, center);
 	},
 
 	concatenate: function(mx) {
@@ -2047,6 +2065,10 @@ var Matrix = Base.extend({
 	isIdentity: function() {
 		return this._a === 1 && this._c === 0 && this._b === 0 && this._d === 1
 				&& this._tx === 0 && this._ty === 0;
+	},
+
+	orNullIfIdentity: function() {
+		return this.isIdentity() ? null : this;
 	},
 
 	isInvertible: function() {
@@ -2167,7 +2189,6 @@ var Matrix = Base.extend({
 		}
 
 		return {
-			translation: this.getTranslation(),
 			scaling: new Point(scaleX, scaleY),
 			rotation: -Math.atan2(b, a) * 180 / Math.PI,
 			shearing: shear
@@ -2182,34 +2203,12 @@ var Matrix = Base.extend({
 		return new Point(this._tx, this._ty);
 	},
 
-	setTranslation: function() {
-		var point = Point.read(arguments);
-		this._tx = point.x;
-		this._ty = point.y;
-		this._changed();
-	},
-
 	getScaling: function() {
 		return (this.decompose() || {}).scaling;
 	},
 
-	setScaling: function() {
-		var scaling = this.getScaling();
-		if (scaling != null) {
-			var scale = Point.read(arguments);
-			(this._owner || this).scale(
-					scale.x / scaling.x, scale.y / scaling.y);
-		}
-	},
-
 	getRotation: function() {
 		return (this.decompose() || {}).rotation;
-	},
-
-	setRotation: function(angle) {
-		var rotation = this.getRotation();
-		if (rotation != null)
-			(this._owner || this).rotate(angle - rotation);
 	},
 
 	inverted: function() {
@@ -2231,19 +2230,13 @@ var Matrix = Base.extend({
 		ctx.transform(this._a, this._c, this._b, this._d, this._tx, this._ty);
 	}
 }, new function() {
-	return Base.each({
-		scaleX: '_a',
-		scaleY: '_d',
-		translateX: '_tx',
-		translateY: '_ty',
-		shearX: '_b',
-		shearY: '_c'
-	}, function(prop, name) {
-		name = Base.capitalize(name);
-		this['get' + name] = function() {
+	return Base.each(['a', 'c', 'b', 'd', 'tx', 'ty'], function(name) {
+		var part = Base.capitalize(name),
+			prop = '_' + name;
+		this['get' + part] = function() {
 			return this[prop];
 		};
-		this['set' + name] = function(value) {
+		this['set' + part] = function(value) {
 			this[prop] = value;
 			this._changed();
 		};
@@ -2376,7 +2369,7 @@ var Project = PaperScopeItem.extend({
 			this.view = view instanceof View ? view : View.create(view);
 		this._selectedItems = {};
 		this._selectedItemCount = 0;
-		this._drawCount = 0;
+		this._updateVersion = 0;
 		this.options = {};
 	},
 
@@ -2506,13 +2499,12 @@ var Project = PaperScopeItem.extend({
 	},
 
 	draw: function(ctx, matrix, ratio) {
-		this._drawCount++;
+		this._updateVersion++;
 		ctx.save();
 		matrix.applyToContext(ctx);
 		var param = new Base({
 			offset: new Point(0, 0),
 			ratio: ratio,
-			transforms: [matrix],
 			trackTransforms: true
 		});
 		for (var i = 0, l = this.layers.length; i < l; i++)
@@ -2524,18 +2516,18 @@ var Project = PaperScopeItem.extend({
 			ctx.strokeWidth = 1;
 			for (var id in this._selectedItems) {
 				var item = this._selectedItems[id];
-				if (item._drawCount === this._drawCount
+				if (item._updateVersion === this._updateVersion
 						&& (item._drawSelected || item._boundsSelected)) {
 					var color = item.getSelectedColor()
 							|| item.getLayer().getSelectedColor();
 					ctx.strokeStyle = ctx.fillStyle = color
 							? color.toCanvasStyle(ctx) : '#009dec';
-					var mx = item._globalMatrix;
+					var mx = matrix.clone().concatenate(item._globalMatrix);
 					if (item._drawSelected)
 						item._drawSelected(ctx, mx);
 					if (item._boundsSelected) {
 						var coords = mx._transformCorners(
-								item._getBounds('getBounds'));
+								item.getInternalBounds());
 						ctx.beginPath();
 						for (var i = 0; i < 8; i++)
 							ctx[i === 0 ? 'moveTo' : 'lineTo'](
@@ -2564,7 +2556,6 @@ var Symbol = Base.extend({
 		this.project.symbols.push(this);
 		if (item)
 			this.setDefinition(item, dontCenter);
-		this._instances = {};
 	},
 
 	_serialize: function(options, dictionary) {
@@ -2575,9 +2566,12 @@ var Symbol = Base.extend({
 	},
 
 	_changed: function(flags) {
-		Base.each(this._instances, function(item) {
-			item._changed(flags);
-		});
+		if (flags & 4) {
+			Item._clearBoundsCache(this);
+		}
+		if (flags & 1) {
+			this.project._needsUpdate = true;
+		}
 	},
 
 	getDefinition: function() {
@@ -2625,9 +2619,11 @@ var Item = Base.extend(Callback, {
 	_class: 'Item',
 	_transformContent: true,
 	_boundsSelected: false,
+	_selectChildren: false,
 	_serializeFields: {
 		name: null,
 		matrix: new Matrix(),
+		pivot: null,
 		locked: false,
 		visible: true,
 		blendMode: 'normal',
@@ -2642,20 +2638,22 @@ var Item = Base.extend(Callback, {
 	},
 
 	_initialize: function(props, point) {
-		this._id = Item._id = (Item._id || 0) + 1;
+		var internal = props && props.internal === true;
+		if (!internal)
+			this._id = Item._id = (Item._id || 0) + 1;
+		var matrix = this._matrix = new Matrix();
+		if (point)
+			matrix.translate(point);
+		matrix._owner = this;
 		if (!this._project) {
 			var project = paper.project;
-			if (props && props.insert === false) {
+			if (internal || props && props.insert === false) {
 				this._setProject(project);
 			} else {
 				(project.activeLayer || new Layer()).addChild(this);
 			}
 		}
 		this._style = new Style(this._project._currentStyle, this);
-		var matrix = this._matrix = new Matrix();
-		if (point)
-			matrix.translate(point);
-		matrix._owner = this;
 		return props ? this._set(props, { insert: true }) : true;
 	},
 
@@ -2746,24 +2744,25 @@ var Item = Base.extend(Callback, {
 	},
 
 	_changed: function(flags) {
-		var parent = this._parent,
-			project = this._project,
-			symbol = this._parentSymbol;
-		this._drawCount = null;
+		var symbol = this._parentSymbol,
+			cacheParent = this._parent || symbol,
+			project = this._project;
 		if (flags & 4) {
 			delete this._bounds;
 			delete this._position;
+			delete this._decomposed;
+			delete this._globalMatrix;
 		}
-		if (parent && (flags
+		if (cacheParent && (flags
 				& (4 | 8))) {
-			parent._clearBoundsCache();
+			Item._clearBoundsCache(cacheParent);
 		}
 		if (flags & 2) {
-			this._clearBoundsCache();
+			Item._clearBoundsCache(this);
 		}
 		if (project) {
 			if (flags & 1) {
-				project._needsRedraw = true;
+				project._needsUpdate = true;
 			}
 			if (project._changes) {
 				var entry = project._changesById[this._id];
@@ -2865,7 +2864,7 @@ var Item = Base.extend(Callback, {
 	_guide: false,
 
 	isSelected: function() {
-		if (this._children) {
+		if (this._selectChildren) {
 			for (var i = 0, l = this._children.length; i < l; i++)
 				if (this._children[i].isSelected())
 					return true;
@@ -2873,12 +2872,12 @@ var Item = Base.extend(Callback, {
 		return this._selected;
 	},
 
-	setSelected: function(selected ) {
-		if (this._children && !arguments[1]) {
+	setSelected: function(selected, noChildren) {
+		if (!noChildren && this._selectChildren) {
 			for (var i = 0, l = this._children.length; i < l; i++)
 				this._children[i].setSelected(selected);
 		}
-		if ((selected = !!selected) != this._selected) {
+		if ((selected = !!selected) ^ this._selected) {
 			this._selected = selected;
 			this._project._updateSelection(this);
 			this._changed(33);
@@ -2935,70 +2934,57 @@ var Item = Base.extend(Callback, {
 	},
 
 	getPosition: function() {
-		var pos = this._position
-				|| (this._position = this.getBounds().getCenter(true));
-		return new (arguments[0] ? Point : LinkedPoint)
-				(pos.x, pos.y, this, 'setPosition');
+		var position = this._position,
+			ctor = arguments[0] ? Point : LinkedPoint;
+		if (!position) {
+			var pivot = this._pivot;
+			position = this._position = pivot
+					? this._matrix._transformPoint(pivot)
+					: this.getBounds().getCenter(true);
+		}
+		return new ctor(position.x, position.y, this, 'setPosition');
 	},
 
 	setPosition: function() {
 		this.translate(Point.read(arguments).subtract(this.getPosition(true)));
-	}
-}, Base.each(['getBounds', 'getStrokeBounds', 'getHandleBounds', 'getRoughBounds'],
-	function(name) {
-		this[name] = function() {
+	},
+
+	getPivot: function() {
+		var pivot = this._pivot;
+		if (pivot) {
+			var ctor = arguments[0] ? Point : LinkedPoint;
+			pivot = new ctor(pivot.x, pivot.y, this, 'setAnchor');
+		}
+		return pivot;
+	},
+
+	setPivot: function() {
+		this._pivot = Point.read(arguments);
+		delete this._position;
+	},
+
+	_pivot: null,
+
+	getRegistration: '#getAnchor',
+	setRegistration: '#setAnchor'
+}, Base.each(['getBounds', 'getStrokeBounds', 'getHandleBounds',
+		'getRoughBounds', 'getInternalBounds', 'getInternalRoughBounds'],
+	function(key) {
+		var match = key.match(/^getInternal(.*)$/),
+			internalGetter = match ? 'get' + match[1] : null;
+		this[key] = function() {
 			var getter = this._boundsGetter,
-				bounds = this._getCachedBounds(typeof getter == 'string'
-						? getter : getter && getter[name] || name, arguments[0]);
-			return name === 'getBounds'
+				bounds = this._getCachedBounds(!internalGetter
+						&& (typeof getter === 'string'
+							? getter : getter && getter[key])
+						|| key, arguments[0], null, internalGetter);
+			return key === 'getBounds'
 					? new LinkedRectangle(bounds.x, bounds.y, bounds.width,
 							bounds.height, this, 'setBounds') 
 					: bounds;
 		};
 	},
 {
-	_getCachedBounds: function(getter, matrix, cacheItem) {
-		var cache = (!matrix || matrix.equals(this._matrix)) && getter;
-		if (cacheItem && this._parent) {
-			var id = cacheItem._id,
-				ref = this._parent._boundsCache
-					= this._parent._boundsCache || {
-				ids: {},
-				list: []
-			};
-			if (!ref.ids[id]) {
-				ref.list.push(cacheItem);
-				ref.ids[id] = cacheItem;
-			}
-		}
-		if (cache && this._bounds && this._bounds[cache])
-			return this._bounds[cache].clone();
-		var identity = this._matrix.isIdentity();
-		matrix = !matrix || matrix.isIdentity()
-				? identity ? null : this._matrix
-				: identity ? matrix : matrix.clone().concatenate(this._matrix);
-		var bounds = this._getBounds(getter, matrix, cache ? this : cacheItem);
-		if (cache) {
-			if (!this._bounds)
-				this._bounds = {};
-			this._bounds[cache] = bounds.clone();
-		}
-		return bounds;
-	},
-
-	_clearBoundsCache: function() {
-		if (this._boundsCache) {
-			for (var i = 0, list = this._boundsCache.list, l = list.length;
-					i < l; i++) {
-				var item = list[i];
-				delete item._bounds;
-				if (item != this && item._boundsCache)
-					item._clearBoundsCache();
-			}
-			delete this._boundsCache;
-		}
-	},
-
 	_getBounds: function(getter, matrix, cacheItem) {
 		var children = this._children;
 		if (!children || children.length == 0)
@@ -3036,9 +3022,94 @@ var Item = Base.extend(Callback, {
 		center = bounds.getCenter();
 		matrix.translate(-center.x, -center.y);
 		this.transform(matrix);
+	},
+
+	_getCachedBounds: function(getter, matrix, cacheItem, internalGetter) {
+		matrix = matrix && matrix.orNullIfIdentity();
+		var _matrix = internalGetter ? null : this._matrix.orNullIfIdentity(),
+			cache = (!matrix || matrix.equals(_matrix)) && getter;
+		var cacheParent = this._parent || this._parentSymbol;
+		if (cacheItem && cacheParent) {
+			var id = cacheItem._id,
+				ref = cacheParent._boundsCache = cacheParent._boundsCache || {
+					ids: {},
+					list: []
+				};
+			if (!ref.ids[id]) {
+				ref.list.push(cacheItem);
+				ref.ids[id] = cacheItem;
+			}
+		}
+		if (cache && this._bounds && this._bounds[cache])
+			return this._bounds[cache].clone();
+		matrix = !matrix
+				? _matrix
+				: _matrix
+					? matrix.clone().concatenate(_matrix)
+					: matrix;
+		var bounds = this._getBounds(internalGetter || getter, matrix,
+				cache ? this : cacheItem);
+		if (cache) {
+			if (!this._bounds)
+				this._bounds = {};
+			var cached = this._bounds[cache] = bounds.clone();
+			cached._internal = !!internalGetter;
+		}
+		return bounds;
+	},
+
+	statics: {
+		_clearBoundsCache: function(item) {
+			if (item._boundsCache) {
+				for (var i = 0, list = item._boundsCache.list, l = list.length;
+						i < l; i++) {
+					var child = list[i];
+					delete child._bounds;
+					delete child._position;
+					if (child !== item && child._boundsCache)
+						child._clearBoundsCache();
+				}
+				delete item._boundsCache;
+			}
+		}
 	}
 
 }), {
+	_decompose: function() {
+		return this._decomposed = this._matrix.decompose();
+	},
+
+	getRotation: function() {
+		var decomposed = this._decomposed || this._decompose();
+		return decomposed && decomposed.rotation;
+	},
+
+	setRotation: function(rotation) {
+		var current = this.getRotation();
+		if (current != null && rotation != null) {
+			var decomposed = this._decomposed;
+			this.rotate(rotation - current);
+			decomposed.rotation = rotation;
+			this._decomposed = decomposed;
+		}
+	},
+
+	getScaling: function() {
+		var decomposed = this._decomposed || this._decompose();
+		return decomposed && decomposed.scaling;
+	},
+
+	setScaling: function() {
+		var current = this.getScaling();
+		if (current != null) {
+			var scaling = Point.read(arguments, 0, 0, { clone: true }),
+				decomposed = this._decomposed;
+			this.scale(scaling.x / current.x, scaling.y / current.y);
+			decomposed.scaling = scaling;
+			this._decomposed = decomposed;
+		}
+	},
+
 	getMatrix: function() {
 		return this._matrix;
 	},
@@ -3051,8 +3122,17 @@ var Item = Base.extend(Callback, {
 	},
 
 	getGlobalMatrix: function() {
-		return this._drawCount === this._project._drawCount
-				&& this._globalMatrix || null;
+		var matrix = this._globalMatrix,
+			updateVersion = this._project._updateVersion;
+		if (matrix && matrix._updateVersion !== updateVersion)
+			matrix = null;
+		if (!matrix) {
+			matrix = this._globalMatrix = this._matrix.clone();
+			if (this._parent)
+				matrix.preConcatenate(this._parent.getGlobalMatrix());
+			matrix._updateVersion = updateVersion;
+		}
+		return matrix;
 	},
 
 	getTransformContent: function() {
@@ -3069,20 +3149,25 @@ var Item = Base.extend(Callback, {
 		return this._project;
 	},
 
-	_setProject: function(project) {
-		if (this._project != project) {
-			var hasOnFrame = this.responds('frame');
-			if (hasOnFrame)
-				this._animateItem(false);
+	_setProject: function(project, installEvents) {
+		if (this._project !== project) {
+			if (this._project)
+				this._installEvents(false);
 			this._project = project;
-			if (hasOnFrame)
-				this._animateItem(true);
-			if (this._children) {
-				for (var i = 0, l = this._children.length; i < l; i++) {
-					this._children[i]._setProject(project);
-				}
-			}
+			var children = this._children;
+			for (var i = 0, l = children && children.length; i < l; i++)
+				children[i]._setProject(project);
+			installEvents = true;
 		}
+		if (installEvents)
+			this._installEvents(true);
+	},
+
+	_installEvents: function _installEvents(install) {
+		_installEvents.base.call(this, install);
+		var children = this._children;
+		for (var i = 0, l = children && children.length; i < l; i++)
+			children[i]._installEvents(install);
 	},
 
 	getLayer: function() {
@@ -3220,33 +3305,47 @@ var Item = Base.extend(Callback, {
 			}
 			return false;
 		}
-		return point.isInside(this._getBounds('getBounds'));
+		return point.isInside(this.getInternalBounds());
 	},
 
 	hitTest: function(point, options) {
 		point = Point.read(arguments);
 		options = HitResult.getOptions(Base.read(arguments));
-
 		if (this._locked || !this._visible || this._guide && !options.guides)
 			return null;
 
-		if (!this._children && !this.getRoughBounds()
-				.expand(2 * options.tolerance)._containsPoint(point))
-			return null;
-		point = this._matrix._inverseTransform(point);
+		var matrix = this._matrix,
+			parentTotalMatrix = options._totalMatrix,
+			view = this._project.view,
+			totalMatrix = options._totalMatrix = parentTotalMatrix
+					? parentTotalMatrix.clone().concatenate(matrix)
+					: this.getGlobalMatrix().clone().preConcatenate(
+						view ? view._matrix : new Matrix()),
+			tolerancePadding = options._tolerancePadding = new Size(
+						Path._getPenPadding(1, totalMatrix.inverted())
+					).multiply(
+						Math.max(options.tolerance, 0.00001)
+					);
+		point = matrix._inverseTransform(point);
 
-		var that = this,
+		if (!this._children && !this.getInternalRoughBounds()
+				.expand(tolerancePadding.multiply(2))._containsPoint(point))
+			return null;
+		var checkSelf = !(options.guides && !this._guide
+				|| options.selected && !this._selected
+				|| options.type && this._type !== options.type),
+			that = this,
 			res;
+
 		function checkBounds(type, part) {
 			var pt = bounds['get' + part]();
-			if (point.getDistance(pt) < options.tolerance)
+			if (point.subtract(pt).divide(tolerancePadding).length <= 1)
 				return new HitResult(type, that,
 						{ name: Base.hyphenate(part), point: pt });
 		}
 
-		if ((options.center || options.bounds) &&
-				!(this instanceof Layer && !this._parent)) {
-			var bounds = this._getBounds('getBounds');
+		if (checkSelf && (options.center || options.bounds) && this._parent) {
+			var bounds = this.getInternalBounds();
 			if (options.center)
 				res = checkBounds('center', 'Center');
 			if (!res && options.bounds) {
@@ -3259,24 +3358,27 @@ var Item = Base.extend(Callback, {
 			}
 		}
 
-		if ((res || (res = this._children || !(options.guides && !this._guide
-				|| options.selected && !this._selected)
-					? this._hitTest(point, options) : null))
-				&& res.point) {
-			res.point = that._matrix.transform(res.point);
+		var children = !res && this._children;
+		if (children) {
+			var opts = this._getChildHitTestOptions(options);
+			for (var i = children.length - 1; i >= 0 && !res; i--)
+				res = children[i].hitTest(point, opts);
 		}
+		if (!res && checkSelf)
+			res = this._hitTest(point, options);
+		if (res && res.point)
+			res.point = matrix.transform(res.point);
+		options._totalMatrix = parentTotalMatrix;
 		return res;
 	},
 
+	_getChildHitTestOptions: function(options) {
+		return options;
+	},
+
 	_hitTest: function(point, options) {
-		var children = this._children;
-		if (children) {
-			for (var i = children.length - 1, res; i >= 0; i--)
-				if (res = children[i].hitTest(point, options))
-					return res;
-		} else if (options.fill && this.hasFill() && this._contains(point)) {
+		if (options.fill && this.hasFill() && this._contains(point))
 			return new HitResult('fill', this);
-		}
 	},
 
 	matches: function(match) {
@@ -3384,7 +3486,7 @@ var Item = Base.extend(Callback, {
 			for (var i = 0, l = items.length; i < l; i++) {
 				var item = items[i];
 				item._parent = this;
-				item._setProject(this._project);
+				item._setProject(this._project, true);
 				if (item._name)
 					item.setName(item._name);
 			}
@@ -3465,8 +3567,7 @@ var Item = Base.extend(Callback, {
 				this._removeNamed();
 			if (this._index != null)
 				Base.splice(this._parent._children, null, this._index, 1);
-			if (this.responds('frame'))
-				this._animateItem(false);
+			this._installEvents(false);
 			if (notify)
 				this._parent._changed(7);
 			this._parent = null;
@@ -3580,34 +3681,26 @@ var Item = Base.extend(Callback, {
 		return false;
 	},
 
-	scale: function(hor, ver , center) {
-		if (arguments.length < 2 || typeof ver === 'object') {
-			center = ver;
-			ver = hor;
-		}
-		return this.transform(new Matrix().scale(hor, ver,
-				center || this.getPosition(true)));
-	},
-
 	translate: function() {
 		var mx = new Matrix();
 		return this.transform(mx.translate.apply(mx, arguments));
 	},
 
-	rotate: function(angle, center) {
+	rotate: function(angle ) {
 		return this.transform(new Matrix().rotate(angle,
+				Point.read(arguments, 1, 0, { readNull: true })
+					|| this.getPosition(true)));
+	}
+}, Base.each(['scale', 'shear', 'skew'], function(name) {
+	this[name] = function() {
+		var point = Point.read(arguments),
+			center = Point.read(arguments, 0, 0, { readNull: true });
+		return this.transform(new Matrix()[name](point,
 				center || this.getPosition(true)));
-	},
+	};
+}, {
 
-	shear: function(hor, ver, center) {
-		if (arguments.length < 2 || typeof ver === 'object') {
-			center = ver;
-			ver = hor;
-		}
-		return this.transform(new Matrix().shear(hor, ver,
-				center || this.getPosition(true)));
-	},
-
+}), {
 	transform: function(matrix ) {
 		var bounds = this._bounds,
 			position = this._position;
@@ -3615,10 +3708,12 @@ var Item = Base.extend(Callback, {
 		if (this._transformContent || arguments[1])
 			this.applyMatrix(true);
 		this._changed(5);
-		if (bounds && matrix.getRotation() % 90 === 0) {
+		var decomp = bounds && matrix.decompose();
+		if (decomp && !decomp.shearing && decomp.rotation % 90 === 0) {
 			for (var key in bounds) {
 				var rect = bounds[key];
-				matrix._transformBounds(rect, rect);
+				if (this._transformContent || !rect._internal)
+					matrix._transformBounds(rect, rect);
 			}
 			var getter = this._boundsGetter,
 				rect = bounds[getter && getter.getBounds || getter || 'getBounds'];
@@ -3633,6 +3728,7 @@ var Item = Base.extend(Callback, {
 
 	_applyMatrix: function(matrix, applyMatrix) {
 		var children = this._children;
+
 		if (children && children.length > 0) {
 			for (var i = 0, l = children.length; i < l; i++)
 				children[i].transform(matrix, applyMatrix);
@@ -3643,9 +3739,12 @@ var Item = Base.extend(Callback, {
 	applyMatrix: function(_dontNotify) {
 		var matrix = this._matrix;
 		if (this._applyMatrix(matrix, true)) {
-			var style = this._style,
+			var pivot = this._pivot,
+				style = this._style,
 				fillColor = style.getFillColor(true),
 				strokeColor = style.getStrokeColor(true);
+			if (pivot)
+				pivot.transform(matrix);
 			if (fillColor)
 				fillColor.transform(matrix);
 			if (strokeColor)
@@ -3654,16 +3753,17 @@ var Item = Base.extend(Callback, {
 		}
 		if (!_dontNotify)
 			this._changed(5);
+		return this;
 	},
 
 	globalToLocal: function() {
 		var matrix = this.getGlobalMatrix();
-		return matrix && matrix._transformPoint(Point.read(arguments));
+		return matrix && matrix._inverseTransform(Point.read(arguments));
 	},
 
 	localToGlobal: function() {
 		var matrix = this.getGlobalMatrix();
-		return matrix && matrix._inverseTransform(Point.read(arguments));
+		return matrix && matrix._transformPoint(Point.read(arguments));
 	},
 
 	fitBounds: function(rectangle, fill) {
@@ -3731,13 +3831,21 @@ var Item = Base.extend(Callback, {
 	draw: function(ctx, param) {
 		if (!this._visible || this._opacity === 0)
 			return;
-		this._drawCount = this._project._drawCount;
+		var updateVersion = this._updateVersion = this._project._updateVersion;
 		var trackTransforms = param.trackTransforms,
-			transforms = param.transforms,
+			transforms = param.transforms = param.transforms || [new Matrix()],
+			matrix = this._matrix,
 			parentMatrix = transforms[transforms.length - 1],
-			globalMatrix = parentMatrix.clone().concatenate(this._matrix);
-		if (trackTransforms)
+			globalMatrix = parentMatrix.clone().concatenate(matrix);
+		if (!globalMatrix.isInvertible())
+			return;
+		if (trackTransforms) {
+			if (!transforms)
+				transforms = param.transforms = [];
 			transforms.push(this._globalMatrix = globalMatrix);
+			globalMatrix._updateVersion = updateVersion;
+		}
+
 		var blendMode = this._blendMode,
 			opacity = this._opacity,
 			normalBlend = blendMode === 'normal',
@@ -3764,7 +3872,7 @@ var Item = Base.extend(Callback, {
 		} else {
 			ctx.translate(-itemOffset.x, -itemOffset.y);
 		}
-		(direct ? this._matrix : globalMatrix).applyToContext(ctx);
+		(direct ? matrix : globalMatrix).applyToContext(ctx);
 		if (!direct && param.clipItem)
 			param.clipItem.draw(ctx, param.extend({ clip: true }));
 		this._draw(ctx, param);
@@ -3808,6 +3916,7 @@ var Item = Base.extend(Callback, {
 
 var Group = Item.extend({
 	_class: 'Group',
+	_selectChildren: true,
 	_serializeFields: {
 		children: []
 	},
@@ -3888,7 +3997,8 @@ var Layer = Group.extend({
 				this._project.activeLayer = this.getNextSibling()
 						|| this.getPreviousSibling();
 			Base.splice(this._project.layers, null, this._index, 1);
-			this._project._needsRedraw = true;
+			this._installEvents(false);
+			this._project._needsUpdate = true;
 			return true;
 		}
 		return false;
@@ -3917,7 +4027,7 @@ var Layer = Group.extend({
 			this._remove(true);
 			Base.splice(item._project.layers, [this],
 					item._index + (above ? 1 : 0), 0);
-			this._setProject(item._project);
+			this._setProject(item._project, true);
 			return this;
 		}
 		return _insert.base.call(this, above, item, _preserve);
@@ -3928,12 +4038,14 @@ var Shape = Item.extend({
 	_class: 'Shape',
 	_transformContent: false,
 	_boundsSelected: true,
+	_serializeFields: {
+		shape: null,
+		size: null,
+		radius: null
+	},
 
-	initialize: function Shape(shape, center, size, radius, props) {
-		this._shape = shape;
-		this._size = size;
-		this._radius = radius;
-		this._initialize(props, center);
+	initialize: function Shape(props) {
+		this._initialize(props);
 	},
 
 	_equals: function(item) {
@@ -3943,14 +4055,20 @@ var Shape = Item.extend({
 	},
 
 	clone: function(insert) {
-		return this._clone(new Shape(this._shape, this.getPosition(true),
-				this._size.clone(),
-				this._radius.clone ? this._radius.clone() : this._radius,
-				{ insert: false }), insert);
+		return this._clone(new Shape({
+			shape: this._shape,
+			size: this._size,
+			radius: this._radius,
+			insert: false
+		}), insert);
 	},
 
 	getShape: function() {
 		return this._shape;
+	},
+
+	setShape: function(shape) {
+		this._shape = shape;
 	},
 
 	getSize: function() {
@@ -3959,10 +4077,12 @@ var Shape = Item.extend({
 	},
 
 	setSize: function() {
-		var shape = this._shape,
-			size = Size.read(arguments);
-		if (!this._size.equals(size)) {
-			var width = size.width,
+		var size = Size.read(arguments);
+		if (!this._size) {
+			this._size = size.clone();
+		} else if (!this._size.equals(size)) {
+			var shape = this._shape,
+				width = size.width,
 				height = size.height;
 			if (shape === 'rectangle') {
 				var radius = Size.min(this._radius, size.divide(2));
@@ -3995,14 +4115,18 @@ var Shape = Item.extend({
 			this._size.set(size, size);
 		} else {
 			radius = Size.read(arguments);
-			if (this._radius.equals(radius))
-				return;
-			this._radius.set(radius.width, radius.height);
-			if (shape === 'rectangle') {
-				var size = Size.max(this._size, radius.multiply(2));
-				this._size.set(size.width, size.height);
-			} else if (shape === 'ellipse') {
-				this._size.set(radius.width * 2, radius.height * 2);
+			if (!this._radius) {
+				this._radius = radius.clone();
+			} else {
+				if (this._radius.equals(radius))
+					return;
+				this._radius.set(radius.width, radius.height);
+				if (shape === 'rectangle') {
+					var size = Size.max(this._size, radius.multiply(2));
+					this._size.set(size.width, size.height);
+				} else if (shape === 'ellipse') {
+					this._size.set(radius.width * 2, radius.height * 2);
+				}
 			}
 		}
 		this._changed(5);
@@ -4170,7 +4294,11 @@ new function() {
 
 statics: new function() {
 	function createShape(shape, point, size, radius, args) {
-		return new Shape(shape, point, size, radius, Base.getNamed(args));
+		var item = new Shape(Base.getNamed(args));
+		item._shape = shape;
+		item._size = size;
+		item._radius = radius;
+		return item.translate(point);
 	}
 
 	return {
@@ -4346,25 +4474,25 @@ var Raster = Item.extend({
 
 	setSource: function(src) {
 		var that = this,
-			image = document.getElementById(src) || new Image();
+			image;
 
 		function loaded() {
 			var view = that._project.view;
 			if (view)
 				paper = view._scope;
+			that.setImage(image);
 			that.fire('load');
 			if (view)
-				view.draw(true);
+				view.update();
 		}
+
+			image = document.getElementById(src) || new Image();
 
 		if (image.naturalWidth && image.naturalHeight) {
 			setTimeout(loaded, 0);
 		} else {
 			DomEvent.add(image, {
-				load: function() {
-					that.setImage(image);
-					loaded();
-				}
+				load: loaded
 			});
 			if (!image.src)
 				image.src = src;
@@ -4556,10 +4684,8 @@ var PlacedSymbol = Item.extend({
 	},
 
 	setSymbol: function(symbol) {
-		if (this._symbol)
-			delete this._symbol._instances[this._id];
 		this._symbol = symbol;
-		symbol._instances[this._id] = this;
+		this._changed(5);
 	},
 
 	clone: function(insert) {
@@ -4573,15 +4699,16 @@ var PlacedSymbol = Item.extend({
 		return this._symbol._definition.isEmpty();
 	},
 
-	_getBounds: function(getter, matrix) {
-		return this.symbol._definition._getCachedBounds(getter, matrix);
+	_getBounds: function(getter, matrix, cacheItem) {
+		return this.symbol._definition._getCachedBounds(getter, matrix,
+				cacheItem);
 	},
 
 	_hitTest: function(point, options, matrix) {
-		var result = this._symbol._definition._hitTest(point, options, matrix);
-		if (result)
-			result.item = this;
-		return result;
+		var res = this._symbol._definition._hitTest(point, options, matrix);
+		if (res)
+			res.item = this;
+		return res;
 	},
 
 	_draw: function(ctx, param) {
@@ -4746,58 +4873,39 @@ var Segment = Base.extend({
 		return false;
 	},
 
-	_isSelected: function(point) {
-		var state = this._selectionState;
-		return point == this._point ? !!(state & 4)
-			: point == this._handleIn ? !!(state & 1)
-			: point == this._handleOut ? !!(state & 2)
+	_selectionState: 0,
+
+	isSelected: function() {
+		var point = arguments[0], 
+			state = this._selectionState;
+		return !point ? !!(state & 7)
+			: point === this._point ? !!(state & 4)
+			: point === this._handleIn ? !!(state & 1)
+			: point === this._handleOut ? !!(state & 2)
 			: false;
 	},
 
-	_setSelected: function(point, selected) {
-		var path = this._path,
+	setSelected: function(selected ) {
+		var point = arguments[1]; 
+			path = this._path,
 			selected = !!selected, 
-			state = this._selectionState || 0,
-			selection = [
-				!!(state & 4),
-				!!(state & 1),
-				!!(state & 2)
-			];
-		if (point === this._point) {
-			if (selected) {
-				selection[1] = selection[2] = false;
-			} else {
-				var previous = this.getPrevious(),
-					next = this.getNext();
-				selection[1] = previous && (previous._point.isSelected()
-						|| previous._handleOut.isSelected());
-				selection[2] = next && (next._point.isSelected()
-						|| next._handleIn.isSelected());
-			}
-			selection[0] = selected;
+			state = this._selectionState,
+			oldState = state,
+			flag = !point ? 7
+					: point === this._point ? 4
+					: point === this._handleIn ? 1
+					: point === this._handleOut ? 2
+					: 0;
+		if (selected) {
+			state |= flag;
 		} else {
-			var index = point === this._handleIn ? 1 : 2;
-			if (selection[index] != selected) {
-				if (selected)
-					selection[0] = false;
-				selection[index] = selected;
-			}
+			state &= ~flag;
 		}
-		this._selectionState = (selection[0] ? 4 : 0)
-				| (selection[1] ? 1 : 0)
-				| (selection[2] ? 2 : 0);
-		if (path && state != this._selectionState) {
-			path._updateSelection(this, state, this._selectionState);
+		this._selectionState = state;
+		if (path && state !== oldState) {
+			path._updateSelection(this, oldState, state);
 			path._changed(33);
 		}
-	},
-
-	isSelected: function() {
-		return this._isSelected(this._point);
-	},
-
-	setSelected: function(selected) {
-		this._setSelected(this._point, selected);
 	},
 
 	getIndex: function() {
@@ -4977,11 +5085,11 @@ var SegmentPoint = Point.extend({
 	},
 
 	setSelected: function(selected) {
-		this._owner._setSelected(this, selected);
+		this._owner.setSelected(selected, this);
 	},
 
 	isSelected: function() {
-		return this._owner._isSelected(this);
+		return this._owner.isSelected(this);
 	}
 });
 
@@ -5090,16 +5198,21 @@ var Curve = Base.extend({
 	},
 
 	isSelected: function() {
-		return this.getHandle1().isSelected() && this.getHandle2().isSelected();
+		return this.getPoint1().isSelected()
+				&& this.getHandle2().isSelected()
+				&& this.getHandle2().isSelected()
+				&& this.getPoint2().isSelected();
 	},
 
 	setSelected: function(selected) {
+		this.getPoint1().setSelected(selected);
 		this.getHandle1().setSelected(selected);
 		this.getHandle2().setSelected(selected);
+		this.getPoint2().setSelected(selected);
 	},
 
-	getValues: function() {
-		return Curve.getValues(this._segment1, this._segment2);
+	getValues: function(matrix) {
+		return Curve.getValues(this._segment1, this._segment2, matrix);
 	},
 
 	getPoints: function() {
@@ -5214,17 +5327,20 @@ var Curve = Base.extend({
 	},
 
 statics: {
-	getValues: function(segment1, segment2) {
+	getValues: function(segment1, segment2, matrix) {
 		var p1 = segment1._point,
 			h1 = segment1._handleOut,
 			h2 = segment2._handleIn,
-			p2 = segment2._point;
-		return [
-			p1._x, p1._y,
-			p1._x + h1._x, p1._y + h1._y,
-			p2._x + h2._x, p2._y + h2._y,
-			p2._x, p2._y
-		];
+			p2 = segment2._point,
+			values = [
+				p1._x, p1._y,
+				p1._x + h1._x, p1._y + h1._y,
+				p2._x + h2._x, p2._y + h2._y,
+				p2._x, p2._y
+			];
+		if (matrix)
+			matrix._transformCoordinates(values, 0, values, 0, 6);
+		return values;
 	},
 
 	evaluate: function(v, t, type) {
@@ -6037,13 +6153,15 @@ var PathItem = Item.extend({
 		var locations = [],
 			curves1 = this.getCurves(),
 			curves2 = path.getCurves(),
+			matrix1 = this._matrix.orNullIfIdentity(),
+			matrix2 = path._matrix.orNullIfIdentity(),
 			length2 = curves2.length,
 			values2 = [];
 		for (var i = 0; i < length2; i++)
-			values2[i] = curves2[i].getValues();
+			values2[i] = curves2[i].getValues(matrix2);
 		for (var i = 0, l = curves1.length; i < l; i++) {
 			var curve1 = curves1[i],
-				values1 = curve1.getValues();
+				values1 = curve1.getValues(matrix1);
 			for (var j = 0; j < length2; j++)
 				Curve.getIntersections(values1, values2[j], curve1, curves2[j],
 						locations);
@@ -6165,11 +6283,15 @@ var Path = PathItem.extend({
 			? typeof arg[0] === 'object'
 				? arg
 				: arguments
-			: arg && (arg.point !== undefined && arg.size === undefined
-					|| arg.x !== undefined)
+			: arg && (arg.size === undefined && (arg.x !== undefined
+					|| arg.point !== undefined))
 				? arguments
 				: null;
 		this.setSegments(segments || []);
+		if (!segments && typeof arg === 'string') {
+			this.setPathData(arg);
+			arg = null;
+		}
 		this._initialize(!segments && arg);
 	},
 
@@ -6191,6 +6313,7 @@ var Path = PathItem.extend({
 	_changed: function _changed(flags) {
 		_changed.base.call(this, flags);
 		if (flags & 4) {
+			delete (this._compound ? this._parent : this)._currentPath;
 			delete this._length;
 			delete this._clockwise;
 			if (this._curves) {
@@ -6448,7 +6571,7 @@ var Path = PathItem.extend({
 	isFullySelected: function() {
 		var length = this._segments.length;
 		return this._selected && length > 0 && this._selectedSegmentState
-				=== length * 4;
+				=== length * 7;
 	},
 
 	setFullySelected: function(selected) {
@@ -6466,10 +6589,10 @@ var Path = PathItem.extend({
 	_selectSegments: function(selected) {
 		var length = this._segments.length;
 		this._selectedSegmentState = selected
-				? length * 4 : 0;
+				? length * 7 : 0;
 		for (var i = 0; i < length; i++)
 			this._segments[i]._selectionState = selected
-					? 4 : 0;
+					? 7 : 0;
 	},
 
 	_updateSelection: function(segment, oldState, newState) {
@@ -6698,8 +6821,7 @@ var Path = PathItem.extend({
 
 	getStyle: function() {
 		var parent = this._parent;
-		return (parent && parent._type === 'compound-path'
-				? parent : this)._style;
+		return (parent && parent instanceof CompoundPath ? parent : this)._style;
 	},
 
 	toShape: function(insert) {
@@ -6772,7 +6894,7 @@ var Path = PathItem.extend({
 	_getWinding: function(point) {
 		var closed = this._closed;
 		if (!closed && !this.hasFill()
-				|| !this._getBounds('getRoughBounds')._containsPoint(point))
+				|| !this.getInternalRoughBounds()._containsPoint(point))
 			return 0;
 		var curves = this.getCurves(),
 			segments = this._segments,
@@ -6803,67 +6925,62 @@ var Path = PathItem.extend({
 	},
 
 	_hitTest: function(point, options) {
-		var style = this.getStyle(),
+		var that = this,
+			style = this.getStyle(),
 			segments = this._segments,
 			closed = this._closed,
-			tolerance = options.tolerance,
-			radius = 0, join, cap, miterLimit,
-			that = this,
-			area, loc, res;
-
-		if (options.stroke) {
-			radius = style.getStrokeWidth() / 2;
+			tolerancePadding = options._tolerancePadding,
+			strokePadding = tolerancePadding,
+			join, cap, miterLimit,
+			area, loc, res,
+			hasStroke = options.stroke && style.hasStroke(),
+			hasFill = options.fill && style.hasFill(),
+			radius = hasStroke ? style.getStrokeWidth() / 2
+					: hasFill ? 0 : null;
+		if (radius != null) {
 			if (radius > 0) {
 				join = style.getStrokeJoin();
 				cap = style.getStrokeCap();
 				miterLimit = radius * style.getMiterLimit();
+				strokePadding = tolerancePadding.add(new Point(radius, radius));
 			} else {
 				join = cap = 'round';
 			}
-			radius += tolerance;
 		}
 
-		function checkPoint(seg, pt, name) {
-			if (point.getDistance(pt) < tolerance)
-				return new HitResult(name, that, { segment: seg, point: pt });
+		function isCloseEnough(pt, padding) {
+			return point.subtract(pt).divide(padding).length <= 1;
+		}
+
+		function checkSegmentPoint(seg, pt, name) {
+			if (!options.selected || pt.isSelected()) {
+				var anchor = seg._point;
+				if (pt !== anchor)
+					pt = pt.add(anchor);
+				if (isCloseEnough(pt, strokePadding)) {
+					return new HitResult(name, that, {
+						segment: seg,
+						point: pt
+					});
+				}
+			}
 		}
 
 		function checkSegmentPoints(seg, ends) {
-			var pt = seg._point;
-			return (ends || options.segments) && checkPoint(seg, pt, 'segment')
+			return (ends || options.segments)
+				&& checkSegmentPoint(seg, seg._point, 'segment')
 				|| (!ends && options.handles) && (
-					checkPoint(seg, pt.add(seg._handleIn), 'handle-in') ||
-					checkPoint(seg, pt.add(seg._handleOut), 'handle-out'));
+					checkSegmentPoint(seg, seg._handleIn, 'handle-in') ||
+					checkSegmentPoint(seg, seg._handleOut, 'handle-out'));
 		}
 
 		function addAreaPoint(point) {
-			area.push(point);
-		}
-
-		function getAreaCurve(index) {
-			var p1 = area[index],
-				p2 = area[(index + 1) % area.length];
-			return [p1.x, p1.y, p1.x, p1.y, p2.x, p2.y, p2.x ,p2.y];
-		}
-
-		function isInArea(point) {
-			var length = area.length,
-				previous = getAreaCurve(length - 1),
-				roots1 = [],
-				roots2 = [],
-				winding = 0;
-			for (var i = 0; i < length; i++) {
-				var curve = getAreaCurve(i);
-				winding += Curve._getWinding(curve, previous, point.x, point.y,
-						roots1, roots2);
-				previous = curve;
-			}
-			return !!winding;
+			area.add(point);
 		}
 
 		function checkSegmentStroke(segment) {
 			if (join !== 'round' || cap !== 'round') {
-				area = [];
+				area = new Path({ internal: true, closed: true });
 				if (closed || segment._index > 0
 						&& segment._index < segments.length - 1) {
 					if (join !== 'round' && (segment._handleIn.isZero() 
@@ -6873,10 +6990,14 @@ var Path = PathItem.extend({
 				} else if (cap !== 'round') {
 					Path._addSquareCap(segment, cap, radius, addAreaPoint, true);
 				}
-				if (area.length > 0)
-					return isInArea(point);
+				if (!area.isEmpty()) {
+					var loc;
+					return area.contains(point)
+						|| (loc = area.getNearestLocation(point))
+							&& isCloseEnough(loc.getPoint(), tolerancePadding);
+				}
 			}
-			return point.getDistance(segment._point) <= radius;
+			return isCloseEnough(segment._point, strokePadding);
 		}
 
 		if (options.ends && !options.segments && !closed) {
@@ -6884,19 +7005,18 @@ var Path = PathItem.extend({
 					|| checkSegmentPoints(segments[segments.length - 1], true))
 				return res;
 		} else if (options.segments || options.handles) {
-			for (var i = 0, l = segments.length; i < l; i++) {
+			for (var i = 0, l = segments.length; i < l; i++)
 				if (res = checkSegmentPoints(segments[i]))
 					return res;
-			}
 		}
-		if (radius > 0) {
+		if (radius != null) {
 			loc = this.getNearestLocation(point);
 			if (loc) {
 				var parameter = loc.getParameter();
 				if (parameter === 0 || parameter === 1) {
 					if (!checkSegmentStroke(loc.getSegment()))
 						loc = null;
-				} else  if (loc._distance > radius) {
+				} else  if (!isCloseEnough(loc.getPoint(), strokePadding)) {
 					loc = null;
 				}
 			}
@@ -6911,10 +7031,13 @@ var Path = PathItem.extend({
 				}
 			}
 		}
-		return !loc && options.fill && this.hasFill() && this._contains(point)
+		return !loc && hasFill && this._contains(point) || loc && !hasStroke
 				? new HitResult('fill', this)
 				: loc
-					? new HitResult('stroke', this, { location: loc })
+					? new HitResult('stroke', this, {
+						location: loc,
+						point: loc.getPoint()
+					})
 					: null;
 	}
 
@@ -6942,18 +7065,17 @@ var Path = PathItem.extend({
 			var segment = segments[i];
 			segment._transformCoordinates(matrix, coords, false);
 			var state = segment._selectionState,
-				selected = state & 4,
 				pX = coords[0],
 				pY = coords[1];
-			if (selected || (state & 1))
+			if (state & 1)
 				drawHandle(2);
-			if (selected || (state & 2))
+			if (state & 2)
 				drawHandle(4);
 			ctx.save();
 			ctx.beginPath();
 			ctx.rect(pX - half, pY - half, size, size);
 			ctx.fill();
-			if (!selected) {
+			if (!(state & 4)) {
 				ctx.beginPath();
 				ctx.rect(pX - half + 1, pY - half + 1, size - 2, size - 2);
 				ctx.fillStyle = '#ffffff';
@@ -7016,14 +7138,14 @@ var Path = PathItem.extend({
 
 		for (var i = 0; i < length; i++)
 			drawSegment(i);
-		if (path._closed && length > 1)
+		if (path._closed && length > 0)
 			drawSegment(0);
 	}
 
 	return {
 		_draw: function(ctx, param) {
 			var clip = param.clip,
-				compound = param.compound;
+				compound = this._compound = param.compound;
 			if (!compound)
 				ctx.beginPath();
 
@@ -7038,10 +7160,15 @@ var Path = PathItem.extend({
 				return dashArray[((i % dashLength) + dashLength) % dashLength];
 			}
 
-			if (hasFill || hasStroke && !dashLength || compound || clip)
+			if (this._currentPath) {
+				ctx.currentPath = this._currentPath;
+			} else if (hasFill || hasStroke && !dashLength || compound || clip){
 				drawSegments(ctx, this);
-			if (this._closed)
-				ctx.closePath();
+				if (this._closed)
+					ctx.closePath();
+				if (!compound)
+					this._currentPath = ctx.currentPath;
+			}
 
 			if (!clip && !compound && (hasFill || hasStroke)) {
 				this._setStyles(ctx);
@@ -7390,29 +7517,11 @@ statics: {
 	},
 
 	getStrokeBounds: function(segments, closed, style, matrix) {
-		function getPenPadding(radius, matrix) {
-			if (!matrix)
-				return [radius, radius];
-			var mx = matrix.shiftless(),
-				hor = mx.transform(new Point(radius, 0)),
-				ver = mx.transform(new Point(0, radius)),
-				phi = hor.getAngleInRadians(),
-				a = hor.getLength(),
-				b = ver.getLength();
-			var sin = Math.sin(phi),
-				cos = Math.cos(phi),
-				tan = Math.tan(phi),
-				tx = -Math.atan(b * tan / a),
-				ty = Math.atan(b / (tan * a));
-			return [Math.abs(a * Math.cos(tx) * cos - b * Math.sin(tx) * sin),
-					Math.abs(b * Math.sin(ty) * cos + a * Math.cos(ty) * sin)];
-		}
-
 		if (!style.hasStroke())
 			return Path.getBounds(segments, closed, style, matrix);
 		var length = segments.length - (closed ? 0 : 1),
 			radius = style.getStrokeWidth() / 2,
-			padding = getPenPadding(radius, matrix),
+			padding = Path._getPenPadding(radius, matrix),
 			bounds = Path.getBounds(segments, closed, style, matrix, padding),
 			join = style.getStrokeJoin(),
 			cap = style.getStrokeCap(),
@@ -7435,14 +7544,10 @@ statics: {
 		}
 
 		function addCap(segment, cap) {
-			switch (cap) {
-			case 'round':
+			if (cap === 'round') {
 				addJoin(segment, cap);
-				break;
-			case 'butt':
-			case 'square':
+			} else {
 				Path._addSquareCap(segment, cap, radius, add); 
-				break;
 			}
 		}
 
@@ -7450,11 +7555,29 @@ statics: {
 			addJoin(segments[i], join);
 		if (closed) {
 			addJoin(segments[0], join);
-		} else {
+		} else if (length > 0) {
 			addCap(segments[0], cap);
 			addCap(segments[segments.length - 1], cap);
 		}
 		return bounds;
+	},
+
+	_getPenPadding: function(radius, matrix) {
+		if (!matrix)
+			return [radius, radius];
+		var mx = matrix.shiftless(),
+			hor = mx.transform(new Point(radius, 0)),
+			ver = mx.transform(new Point(0, radius)),
+			phi = hor.getAngleInRadians(),
+			a = hor.getLength(),
+			b = ver.getLength();
+		var sin = Math.sin(phi),
+			cos = Math.cos(phi),
+			tan = Math.tan(phi),
+			tx = -Math.atan(b * tan / a),
+			ty = Math.atan(b / (tan * a));
+		return [Math.abs(a * Math.cos(tx) * cos - b * Math.sin(tx) * sin),
+				Math.abs(b * Math.sin(ty) * cos + a * Math.cos(ty) * sin)];
 	},
 
 	_addSquareJoin: function(segment, join, radius, miterLimit, addPoint, area) {
@@ -7510,19 +7633,19 @@ statics: {
 			x2 = -x1,
 			y1 = x1,
 			y2 = x2;
-		strokePadding = strokePadding / 2 || 0;
-		joinPadding = joinPadding / 2 || 0;
 		for (var i = 0, l = segments.length; i < l; i++) {
 			var segment = segments[i];
 			segment._transformCoordinates(matrix, coords, false);
 			for (var j = 0; j < 6; j += 2) {
 				var padding = j == 0 ? joinPadding : strokePadding,
+					paddingX = padding ? padding[0] : 0,
+					paddingY = padding ? padding[1] : 0,
 					x = coords[j],
 					y = coords[j + 1],
-					xn = x - padding,
-					xx = x + padding,
-					yn = y - padding,
-					yx = y + padding;
+					xn = x - paddingX,
+					xx = x + paddingX,
+					yn = y - paddingY,
+					yx = y + paddingY;
 				if (xn < x1) x1 = xn;
 				if (xx > x2) x2 = xx;
 				if (yn < y1) y1 = yn;
@@ -7533,18 +7656,17 @@ statics: {
 	},
 
 	getRoughBounds: function(segments, closed, style, matrix) {
-		var strokeWidth = style.getStrokeColor() ? style.getStrokeWidth() : 0,
-			joinWidth = strokeWidth;
-		if (strokeWidth === 0) {
-			strokeWidth = 0.00001;
-		} else {
+		var strokeRadius = style.hasStroke() ? style.getStrokeWidth() / 2 : 0,
+			joinRadius = strokeRadius;
+		if (strokeRadius > 0) {
 			if (style.getStrokeJoin() === 'miter')
-				joinWidth = strokeWidth * style.getMiterLimit();
+				joinRadius = strokeRadius * style.getMiterLimit();
 			if (style.getStrokeCap() === 'square')
-				joinWidth = Math.max(joinWidth, strokeWidth * Math.sqrt(2));
+				joinRadius = Math.max(joinRadius, strokeRadius * Math.sqrt(2));
 		}
 		return Path.getHandleBounds(segments, closed, style, matrix,
-				strokeWidth, joinWidth);
+				Path._getPenPadding(strokeRadius, matrix),
+				Path._getPenPadding(joinRadius, matrix));
 	}
 }});
 
@@ -7692,8 +7814,19 @@ var CompoundPath = PathItem.extend({
 	initialize: function CompoundPath(arg) {
 		this._children = [];
 		this._namedChildren = {};
-		if (!this._initialize(arg))
-			this.addChildren(Array.isArray(arg) ? arg : arguments);
+		if (!this._initialize(arg)) {
+			if (typeof arg === 'string') {
+				this.setPathData(arg);
+			} else {
+				this.addChildren(Array.isArray(arg) ? arg : arguments);
+			}
+		}
+	},
+
+	_changed: function _changed(flags) {
+		_changed.base.call(this, flags);
+		if (flags & (2 | 4))
+			delete this._currentPath;
 	},
 
 	insertChildren: function insertChildren(index, items, _preserve) {
@@ -7779,20 +7912,10 @@ var CompoundPath = PathItem.extend({
 		return winding;
 	},
 
-	_hitTest : function _hitTest(point, options) {
-		var res = _hitTest.base.call(this, point,
-				new Base(options, { fill: false }));
-		if (!res) {
-			if (options.compoundChildren) {
-				var children =  this._children;
-				for (var i = children.length - 1; i >= 0 && !res; i--)
-					res = children[i]._hitTest(point, options);
-			} else if (options.fill && this.hasFill()
-					&& this._contains(point)) {
-				res = new HitResult('fill', this);
-			}
-		} 
-		return res;
+	_getChildHitTestOptions: function(options) {
+		return options.type === 'path'
+				? options
+				: new Base(options, { fill: false });
 	},
 
 	_draw: function(ctx, param) {
@@ -7800,10 +7923,15 @@ var CompoundPath = PathItem.extend({
 		if (children.length === 0)
 			return;
 
-		ctx.beginPath();
-		param = param.extend({ compound: true });
-		for (var i = 0, l = children.length; i < l; i++)
-			children[i].draw(ctx, param);
+		if (this._currentPath) {
+			ctx.currentPath = this._currentPath;
+		} else {
+			ctx.beginPath();
+			param = param.extend({ compound: true });
+			for (var i = 0, l = children.length; i < l; i++)
+				children[i].draw(ctx, param);
+			this._currentPath = ctx.currentPath;
+		}
 
 		if (!param.clip) {
 			this._setStyles(ctx);
@@ -8168,9 +8296,8 @@ PathItem.inject(new function() {
 				bounds = new Array(length),
 				counters = new Array(length),
 				clockwise;
-			children.sort(function(a, b){
-				var b1 = a.getBounds(), b2 = b.getBounds();
-				return b1._width * b1._height < b2._width * b2._height;
+			children.sort(function(a, b) {
+				return b.getBounds().getArea() - a.getBounds().getArea();
 			});
 			path.addChildren(children);
 			clockwise = children[0].isClockwise();
@@ -8191,8 +8318,8 @@ PathItem.inject(new function() {
 	}
 
 	function computeBoolean(path1, path2, operator, subtract) {
-		path1 = reorientPath(path1.clone(false));
-		path2 = reorientPath(path2.clone(false));
+		path1 = reorientPath(path1.clone(false).applyMatrix());
+		path2 = reorientPath(path2.clone(false).applyMatrix());
 		var path1Clockwise = path1.isClockwise(),
 			path2Clockwise = path2.isClockwise(),
 			intersections = path1.getIntersections(path2);
@@ -9167,8 +9294,10 @@ var Style = Base.extend(new function() {
 		shadowBlur: 0,
 		shadowOffset: new Point(),
 		selectedColor: undefined,
-		font: 'sans-serif',
+		fontFamily: 'sans-serif',
+		fontWeight: 'normal',
 		fontSize: 12,
+		font: 'sans-serif', 
 		leading: null,
 		justification: 'left'
 	};
@@ -9178,8 +9307,10 @@ var Style = Base.extend(new function() {
 		strokeCap: 25,
 		strokeJoin: 25,
 		miterLimit: 25,
-		font: 5,
+		fontFamily: 5,
+		fontWeight: 5,
 		fontSize: 5,
+		font: 5, 
 		leading: 5,
 		justification: 5
 	};
@@ -9228,7 +9359,7 @@ var Style = Base.extend(new function() {
 			var value,
 				children = this._item && this._item._children;
 			if (!children || children.length === 0 || arguments[0]
-					|| this._item._type === 'compound-path') {
+					|| this._item instanceof CompoundPath) {
 				var value = this._values[key];
 				if (value === undefined) {
 					value = this._defaults[key];
@@ -9309,14 +9440,20 @@ var Style = Base.extend(new function() {
 		return !!this.getShadowColor() && this.getShadowBlur() > 0;
 	},
 
+	getFontStyle: function() {
+		var size = this.getFontSize();
+		return this.getFontWeight()
+				+ ' ' + size + (/[a-z]/i.test(size + '') ? ' ' : 'px ')
+				+ this.getFontFamily();
+	},
+
+	getFont: '#getFontFamily',
+
+	setFont: '#setFontFamily',
+
 	getLeading: function getLeading() {
 		var leading = getLeading.base.call(this);
 		return leading != null ? leading : this.getFontSize() * 1.2;
-	},
-
-	getFontStyle: function() {
-		var size = this.getFontSize();
-		return size + (/[a-z]/i.test(size + '') ? ' ' : 'px ') + this.getFont();
 	}
 
 });
@@ -9501,27 +9638,13 @@ var DomElement = new function() {
 
 var DomEvent = {
 	add: function(el, events) {
-		for (var type in events) {
-			var func = events[type];
-			if (el.addEventListener) {
-				el.addEventListener(type, func, false);
-			} else if (el.attachEvent) {
-				el.attachEvent('on' + type, func.bound = function() {
-					func.call(el, window.event);
-				});
-			}
-		}
+		for (var type in events)
+			el.addEventListener(type, events[type], false);
 	},
 
 	remove: function(el, events) {
-		for (var type in events) {
-			var func = events[type];
-			if (el.removeEventListener) {
-				el.removeEventListener(type, func, false);
-			} else if (el.detachEvent) {
-				el.detachEvent('on' + type, func.bound);
-			}
-		}
+		for (var type in events)
+			el.removeEventListener(type, events[type], false);
 	},
 
 	getPoint: function(event) {
@@ -9540,30 +9663,18 @@ var DomEvent = {
 		return event.target || event.srcElement;
 	},
 
+	getRelatedTarget: function(event) {
+		return event.relatedTarget || event.toElement;
+	},
+
 	getOffset: function(event, target) {
 		return DomEvent.getPoint(event).subtract(DomElement.getOffset(
 				target || DomEvent.getTarget(event)));
 	},
 
-	preventDefault: function(event) {
-		if (event.preventDefault) {
-			event.preventDefault();
-		} else {
-			event.returnValue = false;
-		}
-	},
-
-	stopPropagation: function(event) {
-		if (event.stopPropagation) {
-			event.stopPropagation();
-		} else {
-			event.cancelBubble = true;
-		}
-	},
-
 	stop: function(event) {
-		DomEvent.stopPropagation(event);
-		DomEvent.preventDefault(event);
+		event.stopPropagation();
+		event.preventDefault();
 	}
 };
 
@@ -9675,7 +9786,7 @@ var View = Base.extend(Callback, {
 	remove: function() {
 		if (!this._project)
 			return false;
-		if (View._focused == this)
+		if (View._focused === this)
 			View._focused = null;
 		View._views.splice(View._views.indexOf(this), 1);
 		delete View._viewsById[this._id];
@@ -9685,6 +9796,7 @@ var View = Base.extend(Callback, {
 		DomEvent.remove(window, this._windowHandlers);
 		this._element = this._project = null;
 		this.detach('frame');
+		this._animate = false;
 		this._frameItems = {};
 		return true;
 	},
@@ -9692,13 +9804,11 @@ var View = Base.extend(Callback, {
 	_events: {
 		onFrame: {
 			install: function() {
-				this._animate = true;
-				if (!this._requested)
-					this._requestFrame();
+				this.play();
 			},
 
 			uninstall: function() {
-				this._animate = false;
+				this.pause();
 			}
 		},
 
@@ -9735,7 +9845,7 @@ var View = Base.extend(Callback, {
 		if (this._stats)
 			this._stats.update();
 		this._handlingFrame = false;
-		this.draw(true);
+		this.update();
 	},
 
 	_animateItem: function(item, animate) {
@@ -9766,26 +9876,26 @@ var View = Base.extend(Callback, {
 		}
 	},
 
-	_redraw: function() {
-		this._project._needsRedraw = true;
+	_update: function() {
+		this._project._needsUpdate = true;
 		if (this._handlingFrame)
 			return;
 		if (this._animate) {
 			this._handleFrame();
 		} else {
-			this.draw();
+			this.update();
 		}
 	},
 
 	_changed: function(flags) {
 		if (flags & 1)
-			this._project._needsRedraw = true;
+			this._project._needsUpdate = true;
 	},
 
 	_transform: function(matrix) {
 		this._matrix.concatenate(matrix);
 		this._bounds = null;
-		this._redraw();
+		this._update();
 	},
 
 	getElement: function() {
@@ -9809,7 +9919,7 @@ var View = Base.extend(Callback, {
 			size: size,
 			delta: delta
 		});
-		this._redraw();
+		this._update();
 	},
 
 	_setViewSize: function(size) {
@@ -9854,6 +9964,20 @@ var View = Base.extend(Callback, {
 
 	scrollBy: function() {
 		this._transform(new Matrix().translate(Point.read(arguments).negate()));
+	},
+
+	play: function() {
+		this._animate = true;
+		if (!this._requested)
+			this._requestFrame();
+	},
+
+	pause: function() {
+		this._animate = false;
+	},
+
+	draw: function() {
+		this.update();
 	},
 
 	projectToView: function() {
@@ -9907,36 +10031,50 @@ var View = Base.extend(Callback, {
 		var view = View._focused = getView(event),
 			point = viewToProject(view, event);
 		dragging = true;
-		if (view._onMouseDown)
-			view._onMouseDown(event, point);
+		view._handleEvent('mousedown', point, event);
 		if (tool = view._scope._tool)
-			tool._onHandleEvent('mousedown', point, event);
-		view.draw(true);
+			tool._handleEvent('mousedown', point, event);
+		view.update();
+	}
+
+	function handleMouseMove(view, point, event) {
+		view._handleEvent('mousemove', point, event);
+		var tool = view._scope._tool;
+		if (tool) {
+			tool._handleEvent(dragging && tool.responds('mousedrag')
+					? 'mousedrag' : 'mousemove', point, event);
+		}
+		view.update();
+		return tool;
 	}
 
 	function mousemove(event) {
-		var view;
+		var view = View._focused;
 		if (!dragging) {
-			view = getView(event);
-			if (view) {
-				prevFocus = View._focused;
-				View._focused = tempFocus = view;
-			} else if (tempFocus && tempFocus == View._focused) {
-				View._focused = prevFocus;
+			var target = getView(event);
+			if (target) {
+				if (view !== target)
+					handleMouseMove(view, viewToProject(view, event), event);
+				prevFocus = view;
+				view = View._focused = tempFocus = target;
+			} else if (tempFocus && tempFocus === view) {
+				view = View._focused = prevFocus;
 				updateFocus();
 			}
 		}
-		if (!(view = view || View._focused))
-			return;
-		var point = event && viewToProject(view, event);
-		if (view._onMouseMove)
-			view._onMouseMove(event, point);
-		if (tool = view._scope._tool) {
-			if (tool._onHandleEvent(dragging && tool.responds('mousedrag')
-					? 'mousedrag' : 'mousemove', point, event))
-				DomEvent.stop(event);
+		if (view) {
+			var point = viewToProject(view, event);
+			if (dragging || new Rectangle(new Point(),
+					view.getViewSize()).contains(point))
+				tool = handleMouseMove(view, point, event);
 		}
-		view.draw(true);
+	}
+
+	function mouseout(event) {
+		var view = View._focused,
+			target = DomEvent.getRelatedTarget(event);
+		if (view && (!target || target.nodeName === 'HTML'))
+			handleMouseMove(view, viewToProject(view, event), event);
 	}
 
 	function mouseup(event) {
@@ -9946,20 +10084,20 @@ var View = Base.extend(Callback, {
 		var point = viewToProject(view, event);
 		curPoint = null;
 		dragging = false;
-		if (view._onMouseUp)
-			view._onMouseUp(event, point);
-		if (tool && tool._onHandleEvent('mouseup', point, event))
-			DomEvent.stop(event);
-		view.draw(true);
+		view._handleEvent('mouseup', point, event);
+		if (tool)
+			tool._handleEvent('mouseup', point, event);
+		view.update();
 	}
 
 	function selectstart(event) {
 		if (dragging)
-			DomEvent.stop(event);
+			event.preventDefault();
 	}
 
 	DomEvent.add(document, {
 		mousemove: mousemove,
+		mouseout: mouseout,
 		mouseup: mouseup,
 		touchmove: mousemove,
 		touchend: mouseup,
@@ -9977,6 +10115,8 @@ var View = Base.extend(Callback, {
 			touchstart: mousedown,
 			selectstart: selectstart
 		},
+
+		_handleEvent: function() {},
 
 		statics: {
 			updateFocus: updateFocus
@@ -10023,14 +10163,14 @@ var CanvasView = View.extend({
 		}
 	},
 
-	draw: function(checkRedraw) {
-		if (checkRedraw && !this._project._needsRedraw)
+	update: function() {
+		if (!this._project._needsUpdate)
 			return false;
 		var ctx = this._context,
 			size = this._viewSize;
 		ctx.clearRect(0, 0, size.width + 1, size.height + 1);
 		this._project.draw(ctx, this._matrix, this._ratio);
-		this._project._needsRedraw = false;
+		this._project._needsUpdate = false;
 		return true;
 	}
 }, new function() { 
@@ -10041,86 +10181,98 @@ var CanvasView = View.extend({
 		downItem,
 		lastItem,
 		overItem,
-		hasDrag,
-		doubleClick,
+		dragItem,
+		dblClick,
 		clickTime;
 
-	function callEvent(type, event, point, target, lastPoint, bubble) {
+	function callEvent(view, type, event, point, target, lastPoint) {
 		var item = target,
 			mouseEvent;
-		while (item) {
-			if (item.responds(type)) {
-				if (!mouseEvent)
+
+		function call(obj) {
+			if (obj.responds(type)) {
+				if (!mouseEvent) {
 					mouseEvent = new MouseEvent(type, event, point, target,
 							lastPoint ? point.subtract(lastPoint) : null);
-				if (item.fire(type, mouseEvent)
-						&& (!bubble || mouseEvent._stopped))
-					return false;
+				}
+				if (obj.fire(type, mouseEvent) && mouseEvent.isStopped) {
+					event.preventDefault();
+					return true;
+				}
 			}
+		}
+
+		while (item) {
+			if (call(item))
+				return true;
 			item = item.getParent();
 		}
-		return true;
+		if (call(view))
+			return true;
+		return false;
 	}
 
-	function handleEvent(view, type, event, point, lastPoint) {
-		if (view._eventCounters[type]) {
-			var project = view._project,
+	return {
+		_handleEvent: function(type, point, event) {
+			if (!this._eventCounters[type])
+				return;
+			var project = this._project,
 				hit = project.hitTest(point, {
 					tolerance: project.options.hitTolerance || 0,
 					fill: true,
 					stroke: true
 				}),
-				item = hit && hit.item;
-			if (item) {
-				if (type === 'mousemove' && item != overItem)
-					lastPoint = point;
-				if (type !== 'mousemove' || !hasDrag)
-					callEvent(type, event, point, item, lastPoint);
-				return item;
-			}
-		}
-	}
-
-	return {
-		_onMouseDown: function(event, point) {
-			var item = handleEvent(this, 'mousedown', event, point);
-			doubleClick = lastItem == item && (Date.now() - clickTime < 300);
-			downItem = lastItem = item;
-			downPoint = lastPoint = overPoint = point;
-			hasDrag = downItem && downItem.responds('mousedrag');
-		},
-
-		_onMouseUp: function(event, point) {
-			var item = handleEvent(this, 'mouseup', event, point);
-			if (hasDrag) {
-				if (lastPoint && !lastPoint.equals(point))
-					callEvent('mousedrag', event, point, downItem, lastPoint);
-				if (item != downItem) {
-					overPoint = point;
-					callEvent('mousemove', event, point, item, overPoint);
+				item = hit && hit.item,
+				stopped = false;
+			switch (type) {
+			case 'mousedown':
+				stopped = callEvent(this, type, event, point, item);
+				dblClick = lastItem == item && (Date.now() - clickTime < 300);
+				downItem = lastItem = item;
+				downPoint = lastPoint = overPoint = point;
+				dragItem = !stopped && item;
+				while (dragItem && !dragItem.responds('mousedrag'))
+					dragItem = dragItem._parent;
+				break;
+			case 'mouseup':
+				stopped = callEvent(this, type, event, point, item, downPoint);
+				if (dragItem) {
+					if (lastPoint && !lastPoint.equals(point))
+						callEvent(this, 'mousedrag', event, point, dragItem,
+								lastPoint);
+					if (item !== dragItem) {
+						overPoint = point;
+						callEvent(this, 'mousemove', event, point, item,
+								overPoint);
+					}
 				}
+				if (!stopped && item && item === downItem) {
+					clickTime = Date.now();
+					callEvent(this, dblClick && downItem.responds('doubleclick')
+							? 'doubleclick' : 'click', event, downPoint, item);
+					dblClick = false;
+				}
+				downItem = dragItem = null;
+				break;
+			case 'mousemove':
+				if (dragItem)
+					stopped = callEvent(this, 'mousedrag', event, point,
+							dragItem, lastPoint);
+				if (!stopped) {
+					if (item !== overItem)
+						overPoint = point;
+					stopped = callEvent(this, type, event, point, item,
+							overPoint);
+				}
+				lastPoint = overPoint = point;
+				if (item !== overItem) {
+					callEvent(this, 'mouseleave', event, point, overItem);
+					overItem = item;
+					callEvent(this, 'mouseenter', event, point, item);
+				}
+				break;
 			}
-			if (item === downItem) {
-				clickTime = Date.now();
-				if (!doubleClick
-						|| callEvent('doubleclick', event, downPoint, item))
-					callEvent('click', event, downPoint, item);
-				doubleClick = false;
-			}
-			downItem = null;
-			hasDrag = false;
-		},
-
-		_onMouseMove: function(event, point) {
-			if (downItem)
-				callEvent('mousedrag', event, point, downItem, lastPoint);
-			var item = handleEvent(this, 'mousemove', event, point, overPoint);
-			lastPoint = overPoint = point;
-			if (item !== overItem) {
-				callEvent('mouseleave', event, point, overItem);
-				overItem = item;
-				callEvent('mouseenter', event, point, item);
-			}
+			return stopped;
 		}
 	};
 });
@@ -10132,14 +10284,17 @@ var Event = Base.extend({
 		this.event = event;
 	},
 
+	isPrevented: false,
+	isStopped: false,
+
 	preventDefault: function() {
-		this._prevented = true;
-		DomEvent.preventDefault(this.event);
+		this.isPrevented = true;
+		this.event.preventDefault();
 	},
 
 	stopPropagation: function() {
-		this._stopped = true;
-		DomEvent.stopPropagation(this.event);
+		this.isStopped = true;
+		this.event.stopPropagation();
 	},
 
 	stop: function() {
@@ -10236,7 +10391,7 @@ var Key = new function() {
 			paper = scope;
 			tool.fire(type, new KeyEvent(down, key, character, event));
 			if (view)
-				view.draw(true);
+				view.update();
 		}
 	}
 
@@ -10509,7 +10664,7 @@ var Tool = PaperScopeItem.extend({
 				&& this.fire(type, new ToolEvent(this, type, event));
 	},
 
-	_onHandleEvent: function(type, point, event) {
+	_handleEvent: function(type, point, event) {
 		paper = this._scope;
 		var called = false;
 		switch (type) {
@@ -10547,6 +10702,8 @@ var Tool = PaperScopeItem.extend({
 			}
 			break;
 		}
+		if (called)
+			event.preventDefault();
 		return called;
 	}
 
@@ -10876,7 +11033,8 @@ var SVGStyles = Base.each({
 	miterLimit: ['stroke-miterlimit', 'number'],
 	dashArray: ['stroke-dasharray', 'array'],
 	dashOffset: ['stroke-dashoffset', 'number'],
-	font: ['font-family', 'string'],
+	fontFamily: ['font-family', 'string'],
+	fontWeight: ['font-weight', 'string'],
 	fontSize: ['font-size', 'number'],
 	justification: ['text-anchor', 'lookup', {
 		left: 'start',
@@ -10949,10 +11107,10 @@ new function() {
 				scale = decomposed.scaling;
 			if (trans && !trans.isZero())
 				parts.push('translate(' + formatter.point(trans) + ')');
-			if (!Numerical.isZero(scale.x - 1) || !Numerical.isZero(scale.y - 1))
-				parts.push('scale(' + formatter.point(scale) +')');
 			if (angle)
 				parts.push('rotate(' + formatter.number(angle) + ')');
+			if (!Numerical.isZero(scale.x - 1) || !Numerical.isZero(scale.y - 1))
+				parts.push('scale(' + formatter.point(scale) +')');
 			attrs.transform = parts.join(' ');
 		} else {
 			attrs.transform = 'matrix(' + matrix.getValues().join(',') + ')';
@@ -10995,42 +11153,45 @@ new function() {
 	}
 
 	function exportPath(item, options) {
-		if (options.matchShapes) {
-			var shape = item.toShape(false);
-			if (shape)
-				return exportShape(shape, options);
-		}
-		var segments = item._segments,
-			type,
-			attrs;
-		if (segments.length === 0)
-			return null;
-		if (item.isPolygon()) {
-			if (segments.length >= 3) {
-				type = item._closed ? 'polygon' : 'polyline';
-				var parts = [];
-				for(i = 0, l = segments.length; i < l; i++)
-					parts.push(formatter.point(segments[i]._point));
-				attrs = {
-					points: parts.join(' ')
-				};
-			} else {
-				type = 'line';
-				var first = segments[0]._point,
-					last = segments[segments.length - 1]._point;
-				attrs = {
-					x1: first.x,
-					y1: first.y,
-					x2: last.x,
-					y2: last.y
-				};
-			}
-		} else {
-			type = 'path';
-			var data = item.getPathData();
-			attrs = data && { d: data };
-		}
-		return createElement(type, attrs);
+        if (options.matchShapes) {
+            var shape = item.toShape(false);
+            if (shape)
+                return exportShape(shape, options);
+        }
+        var segments = item._segments,
+            type,
+            attrs;
+        if (segments.length === 0)
+            return null;
+        if (item.isPolygon()) {
+            var svgBounds = paper.project.SVGBounds;
+            if (segments.length >= 3) {
+                type = item._closed ? 'polygon' : 'polyline';
+                var parts = [];
+                for(i = 0, l = segments.length; i < l; i++)  {
+                    p = new Point(segments[i]._point.x-svgBounds.x+5,segments[i]._point.y-svgBounds.y+5);
+                    parts.push(formatter.point(p));
+                }
+                attrs = {
+                    points: parts.join(' ')
+                };
+            } else {
+                type = 'line';
+                var first = new Point(segments[0]._point.x-svgBounds.x+5,segments[0]._point.y-svgBounds.y+5),
+                    last = new Point(segments[segments.length - 1]._point.x-svgBounds.x+5,segments[segments.length - 1]._point.y-svgBounds.y+5);
+                attrs = {
+                    x1: first.x,
+                    y1: first.y,
+                    x2: last.x,
+                    y2: last.y
+                };
+            }
+        } else {
+            type = 'path';
+            var data = item.getPathData();
+            attrs = data && { d: data };
+        }
+        return createElement(type, attrs);
 	}
 
 	function exportShape(item) {
@@ -11139,9 +11300,12 @@ new function() {
 	}
 
 	function exportText(item) {
-		var node = createElement('text', getTransform(item, true));
-		node.textContent = item._content;
-		return node;
+        var svgBounds = paper.project.SVGBounds, coords = getTransform(item, true);
+        coords.x = coords.x-svgBounds.x+5;
+        coords.y = coords.y-svgBounds.y+6;
+        var node = createElement('text', coords);
+        node.textContent = item._content;
+        return node;
 	}
 
 	var exporters = {
@@ -11236,10 +11400,72 @@ new function() {
 	}
 
 	function exportSVG(item, options) {
-		var exporter = exporters[item._type],
-			node = exporter && exporter(item, options);
-		if (node && item._data)
-			node.setAttribute('data-paper-data', JSON.stringify(item._data));
+        var exporter = exporters[item._type],
+            node = exporter && exporter(item, options);
+        if (node && item._data)
+            node.setAttribute('data-paper-data', JSON.stringify(item._data));
+        if (item.dType && item.dType === 'bond' && (!item.bondType || item.bondType !== "aux")) {
+            if (!item._bData) item._bData = {};
+            item._bData.bO = item.bondOrder || 1;
+            switch (item.stereo) {
+                case 0: {
+                    item._bData.bS = 0;
+                    break;
+                }
+                case undefined: {
+                    item._bData.bS = 0;
+                    break;
+                }
+                case 'wedged': {
+                    item._bData.bS = 1;
+                    break;
+                }
+                case 'hashed': {
+                    item._bData.bS = 6;
+                    break;
+                }
+                default: {
+                    item._bData.bS = 0;
+                }
+            }
+            var nodes = [item.n_a, item.n_b], labels = [], points = {};
+            for (var i = 0, l = nodes.length; i < l; i++) {
+                if (nodes[i].labels && nodes[i].labels.atom) {
+                    labels.push(nodes[i].labels.atom.content);
+                    points[labels[i]] = new Point({
+                        x: nodes[i].labels.atom.point.x,
+                        y: nodes[i].labels.atom.point.y - 3.5
+                    })
+                } else {
+                    labels.push("C")
+                }
+            }
+            item._bData.a1 = {
+                id: item.n_a.ref.substring(5),
+                x: points[labels[0]] ? points[labels[0]].x.toFixed(5) : item.n_a.point.x.toFixed(5),
+                y: points[labels[0]] ? points[labels[0]].y.toFixed(5) : item.n_a.point.y.toFixed(5),
+                l: labels[0]
+            };
+            item._bData.a2 = {
+                id: item.n_b.ref.substring(5),
+                x: points[labels[1]] ? points[labels[1]].x.toFixed(5) : item.n_b.point.x.toFixed(5),
+                y: points[labels[1]] ? points[labels[1]].y.toFixed(5) : item.n_b.point.y.toFixed(5),
+                l: labels[1]
+            };
+        } else if (item.dType && item.dType === 'label') {
+            if (!item._bData) item._bData = {};
+            item._bData.c = item.content;
+            var point = new Point({
+                x: item.point.x,
+                y: item.point.y - 3.5
+            })
+            item._bData.p = {
+                x: point.x,
+                y: point.y
+            };
+        }
+        if (node && item._bData)
+            node.setAttribute('bData', JSON.stringify(item._bData));
 		return node && applyStyle(item, node);
 	}
 
@@ -11258,23 +11484,49 @@ new function() {
 	});
 
 	Project.inject({
-		exportSVG: function(options) {
-			options = setOptions(options);
-			var layers = this.layers,
-				size = this.view.getSize(),
-				node = createElement('svg', {
-					x: 0,
-					y: 0,
-					width: size.width,
-					height: size.height,
-					version: '1.1',
-					xmlns: 'http://www.w3.org/2000/svg',
-					'xmlns:xlink': 'http://www.w3.org/1999/xlink'
-				});
-			for (var i = 0, l = layers.length; i < l; i++)
-				node.appendChild(exportSVG(layers[i], options));
-			return exportDefinitions(node, options);
-		}
+        getSvgBounds: function() {
+            var bounds = void 0, i = 0, l = this.layers.length;
+            while(i < l) {
+                var layer = this.layers[i], j = 0, k = layer.children.length;
+                while(j < k) {
+                    var child = layer.children[j]
+                    if (child.type === "group" && child.children.length !== 0) {
+                        if (!bounds) {
+                            bounds = child.bounds;
+                        } else {
+                            var rect = child.bounds;
+                            var x1 = Math.min(bounds._x || bounds.x, rect._x),
+                                y1 = Math.min(bounds._y || bounds.y, rect._y),
+                                x2 = Math.max((bounds._x || bounds.x) + bounds.width, (rect._x || rect.x) + rect.width),
+                                y2 = Math.max((bounds._y || bounds.y) + bounds.height, (rect._y || rect.y) + rect.height);
+                            bounds = new Rectangle(x1, y1, x2 - x1, y2 - y1);
+                        }
+                    }
+                    j++;
+                }
+                i++;
+            }
+            return bounds;
+        },
+        exportSVG: function(options) {
+            options = setOptions(options);
+            this.SVGBounds = this.getSvgBounds();
+            this.SVGBoundsSize = new Size(this.SVGBounds.size.width+10, this.SVGBounds.size.height+10);
+            var layers = this.layers,
+                size = this.SVGBoundsSize || this.view.getSize(),
+                node = createElement('svg', {
+                    x: 0,
+                    y: 0,
+                    width: size.width,
+                    height: size.height,
+                    version: '1.1',
+                    xmlns: 'http://www.w3.org/2000/svg',
+                    'xmlns:xlink': 'http://www.w3.org/1999/xlink'
+                });
+            for (var i = 0, l = layers.length; i < l; i++)
+                node.appendChild(exportSVG(layers[i], options));
+            return exportDefinitions(node, options);
+        }
 	});
 };
 
@@ -11516,10 +11768,10 @@ new function() {
 				matrix.scale(v);
 				break;
 			case 'skewX':
+				matrix.skew(v[0], 0);
+				break;
 			case 'skewY':
-				var value = Math.tan(v[0] * Math.PI / 180),
-					isX = command == 'skewX';
-				matrix.shear(isX ? value : 0, isX ? 0 : value);
+				matrix.skew(0, v[0]);
 				break;
 			}
 		}
@@ -11665,7 +11917,7 @@ new function() {
 				view = scope.project && scope.project.view;
 			if (onLoad)
 				onLoad.call(this, item);
-			view.draw(true);
+			view.update();
 		}
 
 		if (isRoot) {
